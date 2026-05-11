@@ -50,7 +50,7 @@
 
     const payload = buildPayload();
 
-    if (!API_URL || API_URL.includes('PASTE_YOUR_GOOGLE_APPS_SCRIPT_WEB_APP_URL_HERE')) {
+    if (!API_URL || API_URL.includes('https://script.google.com/macros/s/AKfycbyBqP0jx3e78U4ogxzmkhPlOe7Nl_D0KYmsvBX_xkuUG5RHNyQxztSs98P6EQBLLxyH/exec')) {
       showMessage('Submission endpoint is not configured yet. Add your Apps Script web app URL in app.js.', 'error');
       return;
     }
