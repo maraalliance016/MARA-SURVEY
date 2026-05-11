@@ -1,8 +1,8 @@
-﻿/* MARA Survey frontend production script */
+/* MARA Survey frontend production script */
 (() => {
   'use strict';
 
-  const API_URL = 'https://script.google.com/macros/s/AKfycbyBqP0jx3e78U4ogxzmkhPlOe7Nl_D0KYmsvBX_xkuUG5RHNyQxztSs98P6EQBLLxyH/exec';
+  const API_URL = 'https://script.google.com/macros/s/AKfycbyrxODRxVwpwEnb2Q8hclx2Bg4QJTtxehmKY9HCq03ipgB44tcTyUQLq74n0Gr-zilC1A/exec';
   const ALLOWED_ORIGIN = window.location.origin;
   const SUBMIT_COOLDOWN_MS = 30000;
   const STORAGE_KEY = 'mara_survey_last_submit_at';
@@ -11,7 +11,11 @@
   const mainForm = document.getElementById('mainForm');
   const successScreen = document.getElementById('successScreen');
   const pageMain = document.querySelector('main');
+  const emailInput = document.getElementById('email');
   let submissionComplete = false;
+  let isSubmitting = false;
+  let emailAlreadyExists = false;
+  let emailCheckTimer = null;
   let originalUpdateProgress = null;
 
   if (!submitBtn || !mainForm) return;
@@ -22,6 +26,8 @@
   improveAccessibility();
   bindSubmit();
   takeoverProgressTracking();
+  clearRestoredFormStateOnLoad();
+  bindEmailLiveCheck();
 
   function bindSubmit() {
     submitBtn.removeAttribute('onclick');
@@ -32,6 +38,7 @@
 
   async function onSubmit(event) {
     if (event) event.preventDefault();
+    if (submissionComplete || isSubmitting) return;
 
     clearMessage();
 
@@ -50,12 +57,13 @@
 
     const payload = buildPayload();
 
-    if (!API_URL || API_URL.includes('PASTE_YOUR_GOOGLE_APPS_WEB_APP_URL_HERE')) {
+    if (!API_URL || API_URL.includes('PASTE_YOUR_GOOGLE_APPS_SCRIPT_WEB_APP_URL_HERE')) {
       showMessage('Submission endpoint is not configured yet. Add your Apps Script web app URL in app.js.', 'error');
       return;
     }
 
     setSubmitting(true);
+    isSubmitting = true;
     showMessage('Submitting your response...', 'info');
 
     try {
@@ -90,6 +98,7 @@
         : error.message || 'Could not submit right now. Please try again.';
       showMessage(msg, 'error');
     } finally {
+      isSubmitting = false;
       setSubmitting(false);
     }
   }
@@ -140,7 +149,7 @@
 
     const checks = [
       ['f-name', (document.getElementById('name')?.value || '').trim().length > 1],
-      ['f-phone', (document.getElementById('phone')?.value || '').trim().length > 6],
+      ['f-email', (document.getElementById('email')?.value || '').trim().length > 3],
       ['f-assoc', (document.getElementById('assoc')?.value || '').trim() !== ''],
       ['f-tenure', !!document.querySelector('input[name="tenure"]:checked')],
       ['f-rating', !!document.querySelector('input[name="ratingSystem"]:checked')]
@@ -162,6 +171,22 @@
     if (!consentOk) {
       valid = false;
       firstInvalid = firstInvalid || consentBox;
+    }
+
+    const email = (document.getElementById('email')?.value || '').trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      valid = false;
+      const field = document.getElementById('f-email');
+      field?.classList.add('invalid');
+      firstInvalid = firstInvalid || field;
+      return { valid, firstInvalid, message: 'Please enter a valid email address.' };
+    }
+    if (emailAlreadyExists) {
+      valid = false;
+      const field = document.getElementById('f-email');
+      field?.classList.add('invalid');
+      firstInvalid = firstInvalid || field;
+      return { valid, firstInvalid, message: 'This email has already submitted a response.' };
     }
 
     const phone = (document.getElementById('phone')?.value || '').trim();
@@ -196,14 +221,19 @@
 
   function completeSubmission() {
     submissionComplete = true;
+    if (mainForm) {
+      mainForm.querySelectorAll('.section-card, .notice, .submit-area').forEach((el) => {
+        if (el && el.id !== 'successScreen') el.style.display = 'none';
+      });
+    }
     if (successScreen) {
-      mainForm.style.display = 'none';
       successScreen.style.display = 'block';
       successScreen.scrollIntoView({ behavior: 'smooth' });
     }
 
     setProgressComplete();
     detachOriginalProgressListeners();
+    clearFormState();
   }
 
   function setProgressComplete() {
@@ -356,12 +386,108 @@
     status.style.display = 'none';
   }
 
+  function bindEmailLiveCheck() {
+    if (!emailInput) return;
+    emailInput.addEventListener('input', () => {
+      emailAlreadyExists = false;
+      renderEmailLiveStatus('', '');
+      if (emailCheckTimer) clearTimeout(emailCheckTimer);
+      emailCheckTimer = setTimeout(checkEmailExistsLive, 350);
+    });
+    emailInput.addEventListener('blur', checkEmailExistsLive);
+  }
+
+  async function checkEmailExistsLive() {
+    if (!emailInput) return;
+    const email = (emailInput.value || '').trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      emailAlreadyExists = false;
+      renderEmailLiveStatus('', '');
+      return;
+    }
+    if (!API_URL || API_URL.includes('PASTE_YOUR_GOOGLE_APPS_SCRIPT_WEB_APP_URL_HERE')) return;
+
+    try {
+      renderEmailLiveStatus('Checking email...', 'info');
+      const url = `${API_URL}?action=emailExists&email=${encodeURIComponent(email)}`;
+      const res = await fetch(url, { method: 'GET' });
+      const raw = await res.text();
+      const data = JSON.parse(raw);
+      emailAlreadyExists = !!data.exists;
+      if (emailAlreadyExists) {
+        renderEmailLiveStatus('This email has already been used.', 'error');
+      } else {
+        renderEmailLiveStatus('Email is available.', 'success');
+      }
+    } catch (_) {
+      // Silent fallback. Final duplicate check still happens on submit server-side.
+      emailAlreadyExists = false;
+      renderEmailLiveStatus('', '');
+    }
+  }
+
+  function renderEmailLiveStatus(text, type) {
+    const el = document.getElementById('emailLiveStatus');
+    if (!el) return;
+    if (!text) {
+      el.style.display = 'none';
+      el.textContent = '';
+      return;
+    }
+    el.style.display = 'block';
+    el.textContent = text;
+    if (type === 'error') {
+      el.style.color = 'var(--error)';
+    } else if (type === 'success') {
+      el.style.color = 'var(--navy)';
+    } else {
+      el.style.color = 'var(--muted)';
+    }
+  }
+
+  function clearFormState() {
+    // Clear native form controls
+    document.querySelectorAll('input[type="text"], input[type="number"], input[type="tel"], textarea').forEach((el) => {
+      el.value = '';
+    });
+    document.querySelectorAll('select').forEach((el) => {
+      el.selectedIndex = 0;
+    });
+    document.querySelectorAll('input[type="radio"], input[type="checkbox"]').forEach((el) => {
+      el.checked = false;
+    });
+
+    // Clear custom visual states
+    document.querySelectorAll('.radio-opt.selected, .check-opt.selected').forEach((el) => el.classList.remove('selected'));
+    document.querySelectorAll('.scale-btn.active').forEach((el) => el.classList.remove('active'));
+
+    // Reset slider display if present
+    const affordability = document.getElementById('affordability');
+    if (affordability) {
+      affordability.value = affordability.min || '1';
+      if (typeof window.updateSlider === 'function') window.updateSlider();
+    }
+  }
+
+  function clearRestoredFormStateOnLoad() {
+    // Disable autocomplete restore behavior where possible.
+    document.querySelectorAll('input, textarea, select').forEach((el) => {
+      if (!el.hasAttribute('autocomplete')) el.setAttribute('autocomplete', 'off');
+    });
+
+    // BFCache/page restore can keep previous checked state; clear on fresh load/restore.
+    window.addEventListener('pageshow', function () {
+      if (!submissionComplete) clearFormState();
+      if (typeof window.updateProgress === 'function') window.updateProgress();
+    });
+  }
+
   function improveAccessibility() {
     submitBtn.setAttribute('aria-label', 'Submit survey response');
 
     const requiredLabels = [
       document.querySelector('label[for="name"]') || document.querySelector('#f-name .field-label'),
-      document.querySelector('label[for="phone"]') || document.querySelector('#f-phone .field-label')
+      document.querySelector('label[for="email"]') || document.querySelector('#f-email .field-label')
     ];
 
     requiredLabels.forEach((label) => {
@@ -378,6 +504,5 @@
     });
   }
 })();
-
 
 
